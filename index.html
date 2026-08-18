@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kabarabench</title>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+    body {
+      margin: 24px;
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      background: #111;
+      color: #ddd;
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 20px;
+      font-weight: 600;
+    }
+    #status {
+      margin-bottom: 12px;
+      color: #aaa;
+    }
+    #device {
+      display: block;
+      margin-bottom: 16px;
+      color: #888;
+    }
+    #levels {
+      margin-bottom: 16px;
+      font-variant-numeric: tabular-nums;
+      color: #888;
+    }
+    #levels .hot {
+      color: #ddd;
+    }
+    #latest {
+      font-size: 32px;
+      margin-bottom: 4px;
+    }
+    #latestSamples,
+    #stats {
+      color: #888;
+      margin-bottom: 8px;
+    }
+    #log {
+      list-style: none;
+      padding: 0;
+      margin: 16px 0 0;
+      color: #bbb;
+    }
+    #log li {
+      margin: 4px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>Kabarabench</h1>
+  <div id="status">requesting microphone</div>
+  <span id="device">no device</span>
+  <div id="levels">L —    R —</div>
+  <div id="latest">—</div>
+  <div id="latestSamples"></div>
+  <div id="stats">n 0</div>
+  <ol id="log"></ol>
+  <script>
+    const statusEl = document.getElementById('status');
+    const deviceEl = document.getElementById('device');
+    const levelsEl = document.getElementById('levels');
+    const latestEl = document.getElementById('latest');
+    const latestSamplesEl = document.getElementById('latestSamples');
+    const statsEl = document.getElementById('stats');
+    const logEl = document.getElementById('log');
+
+    const audioConstraints = {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      channelCount: 2
+    };
+
+    const stateLabel = {
+      calibrating: 'calibrating',
+      armed: 'listening',
+      capturing: 'capturing',
+      hold: 'waiting for silence'
+    };
+
+    let audioCtx = null;
+    let workletNode = null;
+    let sourceNode = null;
+    let muteNode = null;
+    let stream = null;
+    let trial = 0;
+    const deltas = [];
+    let starting = false;
+    let stereo = true;
+    let noiseText = '';
+    let lastState = '';
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function renderStatus(state) {
+      lastState = state || lastState;
+      let text = stateLabel[lastState] || lastState || '';
+      if (!stereo)
+        text += ' (input is not stereo)';
+      if (lastState === 'armed' && noiseText)
+        text += '   ' + noiseText;
+      if (text)
+        setStatus(text);
+    }
+
+    function formatDuration(seconds) {
+      const us = Math.abs(seconds) * 1e6;
+      if (us >= 1000)
+        return (us / 1000).toFixed(2) + ' ms';
+      return Math.round(us) + ' µs';
+    }
+
+    function formatMs(seconds) {
+      return (seconds * 1000).toFixed(3) + ' ms';
+    }
+
+    function db(x) {
+      if (x <= 0)
+        return '-inf';
+      return (20 * Math.log10(x)).toFixed(1) + ' dBFS';
+    }
+
+    function levelSpan(label, env, threshold) {
+      const hot = env >= threshold;
+      const cls = hot ? ' class="hot"' : '';
+      return '<span' + cls + '>' + label + ' ' + db(env) +
+        ' / ' + db(threshold) + '</span>';
+    }
+
+    function renderStats() {
+      if (!deltas.length) {
+        statsEl.textContent = 'n 0';
+        return;
+      }
+      let min = deltas[0];
+      let max = deltas[0];
+      let sum = 0;
+      for (let i = 0; i < deltas.length; i++) {
+        const v = deltas[i];
+        sum += v;
+        if (v < min)
+          min = v;
+        if (v > max)
+          max = v;
+      }
+      const mean = sum / deltas.length;
+      statsEl.textContent =
+        'n ' + deltas.length +
+        '   mean ' + formatMs(mean) +
+        '   min ' + formatMs(min) +
+        '   max ' + formatMs(max);
+    }
+
+    function addLog(text) {
+      const li = document.createElement('li');
+      li.textContent = text;
+      logEl.insertBefore(li, logEl.firstChild);
+    }
+
+    function stopStream() {
+      if (!stream)
+        return;
+      const tracks = stream.getTracks();
+      for (let i = 0; i < tracks.length; i++)
+        tracks[i].stop();
+      stream = null;
+    }
+
+    function disconnectGraph() {
+      if (sourceNode) {
+        sourceNode.disconnect();
+        sourceNode = null;
+      }
+    }
+
+    function handleWorkletMessage(e) {
+      const msg = e.data;
+      if (!msg || !msg.type)
+        return;
+      if (msg.type === 'status') {
+        renderStatus(msg.state);
+        return;
+      }
+      if (msg.type === 'levels') {
+        levelsEl.innerHTML =
+          levelSpan('L', msg.envL, msg.thresholdL) +
+          '    ' +
+          levelSpan('R', msg.envR, msg.thresholdR);
+        return;
+      }
+      if (msg.type === 'channels') {
+        stereo = msg.count >= 2;
+        renderStatus();
+        return;
+      }
+      if (msg.type === 'calibrated') {
+        noiseText = 'noise L ' + db(msg.noiseL) +
+          '  R ' + db(msg.noiseR) +
+          '   peak L ' + db(msg.peakL) +
+          '  R ' + db(msg.peakR);
+        renderStatus('armed');
+        return;
+      }
+      if (msg.type !== 'result')
+        return;
+      trial += 1;
+      const hasL = msg.onsetL !== null;
+      const hasR = msg.onsetR !== null;
+      if (!hasL && !hasR) {
+        addLog('#' + trial + '  no onset');
+        return;
+      }
+      if (!hasL || !hasR) {
+        const side = hasL ? 'L only' : 'R only';
+        const miss = hasL
+          ? 'R ' + db(msg.envR) + ' / ' + db(msg.thresholdR)
+          : 'L ' + db(msg.envL) + ' / ' + db(msg.thresholdL);
+        latestEl.textContent = side;
+        latestSamplesEl.textContent = miss;
+        addLog('#' + trial + '  ' + side + '   ' + miss);
+        return;
+      }
+      const deltaSamples = msg.onsetR - msg.onsetL;
+      const deltaSec = deltaSamples / msg.sampleRate;
+      deltas.push(deltaSec);
+      const absSamples = deltaSamples < 0 ? -deltaSamples : deltaSamples;
+      if (deltaSamples === 0) {
+        latestEl.textContent = 'simultaneous';
+        latestSamplesEl.textContent = '0 samples';
+        addLog('#' + trial + '  simultaneous');
+      } else {
+        const side = deltaSamples > 0 ? 'L' : 'R';
+        const text = side + ' leads by ' + formatDuration(deltaSec);
+        latestEl.textContent = text;
+        latestSamplesEl.textContent = absSamples + ' samples';
+        addLog('#' + trial + '  ' + text);
+      }
+      renderStats();
+    }
+
+    async function start() {
+      if (starting)
+        return;
+      starting = true;
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setStatus('this browser has no audio input API');
+          return;
+        }
+        const nextStream = await navigator.mediaDevices.getUserMedia({
+          audio: audioConstraints
+        });
+        stopStream();
+        disconnectGraph();
+        stream = nextStream;
+        stereo = true;
+        noiseText = '';
+        const track = stream.getAudioTracks()[0];
+        try {
+          await track.applyConstraints(audioConstraints);
+        } catch (e) {
+        }
+        const settings = track.getSettings();
+        const name = track.label || 'default input';
+        const ch = settings.channelCount ? settings.channelCount + ' ch' : '';
+        deviceEl.textContent = ch ? name + '   ' + ch : name;
+
+        if (!audioCtx)
+          audioCtx = new AudioContext();
+        if (audioCtx.state === 'suspended')
+          await audioCtx.resume();
+        if (!workletNode) {
+          await audioCtx.audioWorklet.addModule('processor.js');
+          workletNode = new AudioWorkletNode(audioCtx, 'envelope-processor', {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            outputChannelCount: [2],
+            channelCount: 2,
+            channelCountMode: 'explicit',
+            channelInterpretation: 'discrete'
+          });
+          workletNode.port.onmessage = handleWorkletMessage;
+          muteNode = audioCtx.createGain();
+          muteNode.gain.value = 0;
+          workletNode.connect(muteNode);
+          muteNode.connect(audioCtx.destination);
+        } else {
+          workletNode.port.postMessage({ type: 'recalibrate' });
+        }
+
+        sourceNode = audioCtx.createMediaStreamSource(stream);
+        sourceNode.connect(workletNode);
+        setStatus('calibrating');
+      } catch (err) {
+        setStatus(err && err.message ? err.message : 'could not open audio input');
+      } finally {
+        starting = false;
+      }
+    }
+
+    start();
+  </script>
+</body>
+</html>
