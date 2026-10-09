@@ -59,8 +59,14 @@ class EnvelopeProcessor extends AudioWorkletProcessor {
   }
 
   floorFor(rms, peak) {
-    const hold = Math.max(peak * 2.5, rms * 4, this.minThreshold * 0.2);
-    const threshold = Math.max(peak * 6, rms * 10, hold * 3, this.minThreshold);
+    // Multipliers assume a quiet cal floor. Hot interfaces can push the raw
+    // threshold above 0 dBFS (linear 1), which nothing can ever cross.
+    const maxThreshold = 0.9;
+    let hold = Math.max(peak * 2.5, rms * 4, this.minThreshold * 0.2);
+    let threshold = Math.max(peak * 6, rms * 10, hold * 3, this.minThreshold);
+    threshold = Math.min(threshold, maxThreshold);
+    hold = Math.min(hold, threshold * 0.5);
+    hold = Math.max(hold, this.minThreshold * 0.2);
     return { hold, threshold };
   }
 

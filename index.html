@@ -243,15 +243,61 @@
       }
     }
 
+    // #region agent log
+    function dbgLog(location, message, data, hypothesisId) {
+      fetch('http://127.0.0.1:7860/ingest/73f61e2f-ecd9-4522-a8eb-59587693ca0f', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Debug-Session-Id': '816d55'
+        },
+        body: JSON.stringify({
+          sessionId: '816d55',
+          runId: 'post-fix',
+          hypothesisId: hypothesisId,
+          location: location,
+          message: message,
+          data: data,
+          timestamp: Date.now()
+        })
+      }).catch(() => {});
+    }
+    let dbgLevelLogs = 0;
+    let dbgHotLogs = 0;
+    // #endregion
+
     function handleWorkletMessage(e) {
       const msg = e.data;
       if (!msg || !msg.type)
         return;
       if (msg.type === 'status') {
+        // #region agent log
+        dbgLog('index.html:status', 'state', { state: msg.state }, 'C');
+        // #endregion
         renderStatus(msg.state);
         return;
       }
       if (msg.type === 'levels') {
+        // #region agent log
+        if (dbgLevelLogs < 8 ||
+          (dbgHotLogs < 12 && (msg.envL >= 0.1 || msg.envR >= 0.1))) {
+          if (msg.envL >= 0.1 || msg.envR >= 0.1)
+            dbgHotLogs++;
+          else
+            dbgLevelLogs++;
+          dbgLog('index.html:levels', 'env vs threshold', {
+            envL: msg.envL,
+            envR: msg.envR,
+            thresholdL: msg.thresholdL,
+            thresholdR: msg.thresholdR,
+            canCrossL: msg.envL >= msg.thresholdL,
+            canCrossR: msg.envR >= msg.thresholdR,
+            thresholdAboveFullScaleL: msg.thresholdL > 1,
+            thresholdAboveFullScaleR: msg.thresholdR > 1,
+            state: msg.state
+          }, 'A');
+        }
+        // #endregion
         levelsEl.innerHTML =
           levelSpan('L', msg.envL, msg.thresholdL) +
           '    ' +
@@ -264,6 +310,20 @@
         return;
       }
       if (msg.type === 'calibrated') {
+        // #region agent log
+        dbgLog('index.html:calibrated', 'calibration floors', {
+          noiseL: msg.noiseL,
+          noiseR: msg.noiseR,
+          peakL: msg.peakL,
+          peakR: msg.peakR,
+          thresholdL: msg.thresholdL,
+          thresholdR: msg.thresholdR,
+          thresholdLdb: msg.thresholdL > 0 ? 20 * Math.log10(msg.thresholdL) : null,
+          thresholdRdb: msg.thresholdR > 0 ? 20 * Math.log10(msg.thresholdR) : null,
+          thresholdAboveFullScaleL: msg.thresholdL > 1,
+          thresholdAboveFullScaleR: msg.thresholdR > 1
+        }, 'A');
+        // #endregion
         noiseText = 'noise L ' + db(msg.noiseL) +
           '  R ' + db(msg.noiseR) +
           '   peak L ' + db(msg.peakL) +
@@ -273,6 +333,16 @@
       }
       if (msg.type !== 'result')
         return;
+      // #region agent log
+      dbgLog('index.html:result', 'onset result', {
+        onsetL: msg.onsetL,
+        onsetR: msg.onsetR,
+        envL: msg.envL,
+        envR: msg.envR,
+        thresholdL: msg.thresholdL,
+        thresholdR: msg.thresholdR
+      }, 'A');
+      // #endregion
       trial += 1;
       const hasL = msg.onsetL !== null;
       const hasR = msg.onsetR !== null;
